@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard de Clientes Compartilhado</title>
+    <!-- Carrega o Tailwind CSS para estilos modernos -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Carrega a fonte Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* Define a fonte Inter como padrão */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Melhora a acessibilidade do foco no input */
+        input:focus {
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+            outline: none;
+        }
+        /* Estilo para a barra de rolagem da tabela em telas menores */
+        .table-container::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .table-container::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 3px;
+        }
+        .table-container::-webkit-scrollbar-track {
+            background-color: #f1f5f9;
+        }
+        /* Oculta seções até que a autenticação e os dados sejam carregados */
+        .hidden-until-data {
+            display: none;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 sm:p-8">
+
+    <!-- Configuração do Firebase -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Variáveis globais fornecidas pelo ambiente (IMPORTANTE!)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Logs de debug para o Firestore
+        setLogLevel('Debug');
+
+        let app, db, auth;
+        let userId = 'loading...';
+        let isAuthReady = false;
+
+        // Inicializa o Firebase
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+        } catch (e) {
+            console.error("Erro ao inicializar Firebase:", e);
+        }
+
+        /**
+         * Inicializa a autenticação e o listener de dados.
+         */
+        window.initFirebase = async function() {
+            if (!auth || !db) return;
+
+            // 1. Autenticação
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    userId = user.uid;
+                } else {
+                    try {
+                        // Tenta autenticar com token customizado se disponível
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(auth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                        userId = auth.currentUser?.uid || crypto.randomUUID();
+                    } catch (e) {
+                        console.error("Erro na autenticação:", e);
+                        userId = 'anon_error';
+                    }
+                }
+                document.getElementById('userIdDisplay').textContent = `ID do Usuário: ${userId}`;
+                isAuthReady = true;
+                
+                // 2. Inicia o listener de dados após a autenticação
+                listenForSharedData();
+            });
+        }
+
+        /**
+         * Salva os dados processados no Firestore (Coleção Pública Compartilhada).
+         * @param {Array} data - Array de objetos de cliente.
+         */
+        window.saveSharedData = async function(data) {
+            if (!isAuthReady || !db) {
+                console.error("Firebase/Auth não está pronto.");
+                return;
+            }
+
+            const docRef = doc(db, `artifacts/${appId}/public/data/client_dashboard`, 'shared_data');
+            
+            // O Firestore tem um limite de 1MB por documento.
+            // Para dashboards simples, salvamos o array inteiro.
+            try {
+                await setDoc(docRef, { 
+                    data: data,
+                    lastUpdated: new Date().toISOString(),
+                    updatedBy: userId 
+                });
+                console.log("Dados salvos com sucesso no Firestore.");
+                document.getElementById('aiFilterStatus').textContent = "Dados processados e salvos para compartilhamento.";
+                document.getElementById('aiFilterStatus').className = 'text-sm font-medium mt-1 text-green-600';
+            } catch (e) {
+                console.error("Erro ao salvar dados no Firestore:", e);
+                // Exibe erro no UI de forma segura
+                document.getElementById('aiFilterStatus').textContent = "ERRO: Falha ao salvar dados compartilhados.";
+                document.getElementById('aiFilterStatus').className = 'text-sm font-medium mt-1 text-red-600';
+            }
+        }
+
+        /**
+         * Listener em tempo real para carregar dados compartilhados de outros usuários.
+         */
+        function listenForSharedData() {
+            const docRef = doc(db, `artifacts/${appId}/public/data/client_dashboard`, 'shared_data');
+            
+            onSnapshot(docRef, (docSnapshot) => {
+                if (docSnapshot.exists()) {
+                    const shared = docSnapshot.data();
+                    if (shared.data && Array.isArray(shared.data)) {
+                        // Dados carregados com sucesso
+                        window.loadClientData(shared.data);
+                        document.getElementById('dashboardSection').classList.remove('hidden-until-data');
+                        document.getElementById('dashboardSection').style.display = 'block';
+                        document.getElementById('dataInputSection').classList.add('hidden');
+                    }
+                } else {
+                    // Se o documento não existir, mantém a tela de input
+                    document.getElementById('dataInputSection').classList.remove('hidden');
+                    document.getElementById('dashboardSection').classList.add('hidden-until-data');
+                    document.getElementById('aiLoadingSpinner').classList.add('hidden');
+                    document.getElementById('aiButtonText').classList.remove('hidden');
+                    console.log("Nenhum dado compartilhado encontrado. Exibindo tela de input.");
+                }
+            }, (error) => {
+                console.error("Erro no listener do Firestore:", error);
+                document.getElementById('aiFilterStatus').textContent = "ERRO: Falha ao carregar dados compartilhados.";
+                document.getElementById('aiFilterStatus').className = 'text-sm font-medium mt-1 text-red-600';
+            });
+        }
+        
+        // Inicia o processo de autenticação/carregamento
+        window.onload = window.initFirebase;
+    </script>
+    
+    <!-- Seção de Status e ID do Usuário -->
+    <div class="max-w-7xl mx-auto mb-4 p-4 text-center bg-gray-200 text-gray-700 rounded-lg shadow-inner">
+        <p id="userIdDisplay" class="text-xs font-mono"></p>
+        <p class="text-xs">Seu dashboard agora é compartilhado! Cole os dados uma vez para que todos vejam.</p>
+    </div>
+
+    <!-- Nova Seção: Entrada de Dados (Exibida até que os dados sejam carregados) -->
+    <div id="dataInputSection" class="max-w-4xl mx-auto bg-white rounded-xl shadow-lg overflow-hidden p-6 sm:p-8">
+        <h2 class="text-2xl font-bold text-gray-800 mb-4">Importar Dados da Planilha (Compartilhado)</h2>
+        <p class="text-gray-600 mb-5">
+            Ao clicar em "Processar Dados", o conteúdo será salvo e compartilhado com outros usuários.
+        </p>
+        <p class="text-sm font-medium text-gray-700 bg-gray-50 p-3 rounded-md mb-6">
+            <code id="csvHeaderExample">Cliente,Data,Valor Atual,Forma de pagamento,Anual,Mensal,Categoria,Vendedor</code>
+        </p>
+        
+        <textarea 
+            id="csvInput"
+            rows="10"
+            class="w-full p-3 rounded-lg border border-gray-300 bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-150 ease-in-out font-mono text-sm"
+            placeholder="Cole seus dados CSV aqui..."></textarea>
+        
+        <button 
+            id="processButton"
+            class="mt-5 w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-150 ease-in-out">
+            Processar Dados e Compartilhar
+        </button>
+        <p id="errorMessage" class="text-red-600 text-sm mt-3 hidden"></p>
+    </div>
+
+    <!-- Dashboard Principal (Oculto por padrão, visível após carregar dados) -->
+    <div id="dashboardSection" class="max-w-7xl mx-auto bg-white rounded-xl shadow-lg overflow-hidden hidden-until-data">
+        
+        <!-- Cabeçalho e Área de Consulta AI -->
+        <header class="p-6 border-b border-gray-200">
+            <div class="flex flex-col gap-4">
+                <h1 class="text-2xl font-bold text-gray-800">
+                    Dashboard de Clientes (Compartilhado)
+                </h1>
+
+                <!-- Área de Busca Manual -->
+                <div class="w-full">
+                    <label for="manualSearchInput" class="block text-sm font-medium text-gray-700 mb-2">Busca Rápida (Ex: Nome do Cliente)</label>
+                    <input 
+                        type="text" 
+                        id="manualSearchInput"
+                        placeholder="Digite um nome, vendedor, plano ou status..."
+                        class="w-full p-2.5 rounded-lg border border-gray-300 bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-150 ease-in-out"
+                    >
+                </div>
+                
+                <!-- Área de Consulta AI -->
+                <div class="w-full">
+                    <label for="aiQueryInput" class="block text-sm font-medium text-gray-700 mb-2 mt-4">Consulta de Linguagem Natural (AI)</label>
+                    <div class="flex flex-col sm:flex-row gap-2">
+                        <input 
+                            type="text" 
+                            id="aiQueryInput"
+                            placeholder="Ex: 'Clientes que compraram em Novembro de 2024' ou 'Vendas acima de R$ 500'"
+                            class="w-full p-2.5 rounded-lg border border-gray-300 bg-gray-50 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition duration-150 ease-in-out"
+                        >
+                        <button 
+                            id="askAiButton"
+                            class="flex-shrink-0 bg-purple-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2 transition duration-150 ease-in-out disabled:opacity-50 flex items-center justify-center"
+                        >
+                            <span id="aiButtonText">Perguntar à AI</span>
+                            <svg id="aiLoadingSpinner" class="animate-spin h-5 w-5 text-white hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                    <button id="clearAiFilterButton" class="mt-2 text-sm text-gray-500 hover:text-gray-700 hidden underline">Limpar Filtro AI</button>
+                    <p id="aiFilterStatus" class="text-sm font-medium mt-1"></p>
+                </div>
+            </div>
+        </header>
+
+        <!-- Seção de KPIs (Indicadores) -->
+        <section class="grid grid-cols-1 md:grid-cols-3 gap-6 p-6">
+            <div class="bg-blue-50 p-5 rounded-lg shadow-sm border border-blue-100">
+                <h2 class="text-sm font-medium text-blue-600 uppercase">Total de Clientes</h2>
+                <p id="kpiTotalClientes" class="text-3xl font-bold text-blue-900 mt-1">0</p>
+            </div>
+            <div class="bg-green-50 p-5 rounded-lg shadow-sm border border-green-100">
+                <h2 class="text-sm font-medium text-green-600 uppercase">Clientes Ativos</h2>
+                <p id="kpiClientesAtivos" class="text-3xl font-bold text-green-900 mt-1">0</p>
+            </div>
+            <div class="bg-purple-50 p-5 rounded-lg shadow-sm border border-purple-100">
+                <h2 class="text-sm font-medium text-purple-600 uppercase">Valor Total (Vendas)</h2>
+                <p id="kpiValorTotal" class="text-3xl font-bold text-purple-900 mt-1">R$ 0,00</p>
+            </div>
+        </section>
+
+        <!-- Container da Tabela -->
+        <div class="p-6 table-container overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Cliente</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Usuário</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data da Venda</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Vendedor</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Plano (Categoria)</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Valor Atual</th>
+                    </tr>
+                </thead>
+                <tbody id="clientTableBody" class="bg-white divide-y divide-gray-200">
+                    <!-- Linhas da tabela serão inseridas aqui pelo JavaScript -->
+                </tbody>
+            </table>
+
+            <!-- Mensagem de "Nenhum resultado" -->
+            <div id="noResultsMessage" class="text-center py-10 text-gray-500 hidden">
+                <p class="text-lg font-medium">Nenhum cliente encontrado</p>
+                <p class="text-sm">Tente ajustar seus termos de pesquisa.</p>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // --- DADOS GLOBAIS E CHAVES DA API ---
+        let clientData = [];
+        const apiKey = ""; // A chave será fornecida pelo ambiente
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+        // Mapeamento dos campos internos para a AI entender
+        const AI_FIELDS = {
+            clienteNome: "Nome do Cliente",
+            dataVenda: "Data da Venda (formato DD/MM/AAAA)",
+            vendedor: "Vendedor",
+            plano: "Plano/Categoria",
+            valor: "Valor da Venda (numérico)"
+        };
+
+
+        // --- ELEMENTOS DO DOM ---
+        const dataInputSection = document.getElementById('dataInputSection');
+        const dashboardSection = document.getElementById('dashboardSection');
+        const tableBody = document.getElementById('clientTableBody');
+        const noResultsMessage = document.getElementById('noResultsMessage');
+        const kpiTotalClientes = document.getElementById('kpiTotalClientes');
+        const kpiClientesAtivos = document.getElementById('kpiClientesAtivos');
+        const kpiValorTotal = document.getElementById('kpiValorTotal');
+        const csvInput = document.getElementById('csvInput');
+        const processButton = document.getElementById('processButton');
+        const errorMessage = document.getElementById('errorMessage');
+
+        // Elementos da AI
+        const aiQueryInput = document.getElementById('aiQueryInput');
+        const askAiButton = document.getElementById('askAiButton');
+        const aiButtonText = document.getElementById('aiButtonText');
+        const aiLoadingSpinner = document.getElementById('aiLoadingSpinner');
+        const clearAiFilterButton = document.getElementById('clearAiFilterButton');
+        const aiFilterStatus = document.getElementById('aiFilterStatus');
+        
+        // Elemento da Busca Manual
+        const manualSearchInput = document.getElementById('manualSearchInput');
+
+
+        // --- FUNÇÕES AUXILIARES ---
+
+        /**
+         * FUNÇÃO GLOBAL: Carrega os dados recebidos do Firestore.
+         */
+        window.loadClientData = function(data) {
+            clientData = data;
+            
+            // Limpa os filtros ao carregar novos dados
+            aiQueryInput.value = '';
+            manualSearchInput.value = '';
+            aiFilterStatus.textContent = 'Dados carregados do servidor. Pronto para filtrar.';
+            aiFilterStatus.className = 'text-sm font-medium mt-1 text-gray-500';
+            clearAiFilterButton.classList.add('hidden');
+
+            // Calcula os KPIs
+            calculateKPIs(clientData);
+            
+            // Renderiza a tabela
+            renderTable(clientData);
+
+            // Adiciona listeners, se ainda não estiverem adicionados
+            if (!manualSearchInput.listenerAdded) {
+                askAiButton.addEventListener('click', askAIForFilter);
+                clearAiFilterButton.addEventListener('click', () => applyFilter(null));
+                manualSearchInput.addEventListener('input', (e) => applyManualFilter(e.target.value));
+                manualSearchInput.listenerAdded = true;
+            }
+        }
+
+
+        /**
+         * Formata um número para a moeda brasileira (BRL).
+         */
+        function formatCurrency(value) {
+            const numericValue = typeof value === 'string' ? parseFloat(value) : value;
+            if (isNaN(numericValue)) {
+                return "R$ -";
+            }
+            return new Intl.NumberFormat('pt-BR', { 
+                style: 'currency', 
+                currency: 'BRL' 
+            }).format(numericValue);
+        }
+
+        /**
+         * Formata uma data para "DD/MM/YYYY".
+         */
+        function formatDate(dateString) {
+            try {
+                // Tenta formatar YYYY-MM-DD
+                let parts = dateString.split('-');
+                if (parts.length === 3) {
+                    return `${parts[2]}/${parts[1]}/${parts[0]}`;
+                }
+                // Tenta formatar DD/MM/YYYY
+                parts = dateString.split('/');
+                if (parts.length === 3) {
+                    return dateString;
+                }
+                return dateString;
+            } catch (e) {
+                return dateString; 
+            }
+        }
+
+        /**
+         * Retorna as classes do Tailwind para o "badge" de status.
+         */
+        function getStatusBadge(status) {
+            const baseClasses = "px-2.5 py-0.5 rounded-full text-xs font-medium inline-block";
+            const normalizedStatus = status ? status.charAt(0).toUpperCase() + status.slice(1).toLowerCase() : "N/A";
+
+            switch (normalizedStatus) {
+                case 'Ativo':
+                    return `${baseClasses} bg-green-100 text-green-800`;
+                case 'Inativo':
+                    return `${baseClasses} bg-red-100 text-red-800`;
+                case 'Pendente':
+                    return `${baseClasses} bg-yellow-100 text-yellow-800`;
+                case 'N/A':
+                default:
+                    return `${baseClasses} bg-gray-100 text-gray-800`;
+            }
+        }
+
+
+        // --- FUNÇÕES DE FILTRAGEM ---
+
+        /**
+         * Aplica a busca manual (texto livre) aos dados do cliente.
+         */
+        function applyManualFilter(searchTerm) {
+            // 1. Limpa o estado da AI
+            aiQueryInput.value = '';
+            aiFilterStatus.textContent = '';
+            clearAiFilterButton.classList.add('hidden');
+            
+            const term = searchTerm.toLowerCase().trim();
+
+            if (term === "") {
+                renderTable(clientData);
+                return;
+            }
+
+            const filteredData = clientData.filter(client => {
+                // Busca em todos os campos relevantes (convertidos para string e minúsculas)
+                const searchableFields = [
+                    client.clienteNome,
+                    client.vendedor,
+                    client.plano,
+                    client.status,
+                    client.dataVenda
+                ];
+
+                return searchableFields.some(field => 
+                    String(field || '').toLowerCase().includes(term)
+                );
+            });
+
+            aiFilterStatus.className = 'text-sm font-medium mt-1 text-blue-700';
+            aiFilterStatus.textContent = `Filtro Manual Aplicado: ${filteredData.length} resultados.`;
+            renderTable(filteredData);
+        }
+
+        /**
+         * Aplica o filtro JSON retornado pela AI aos dados do cliente.
+         * @param {Array} filters - Array de objetos de filtro [{field, operator, value}].
+         */
+        function applyFilter(filters) {
+            // 1. Limpa o input de busca manual
+            manualSearchInput.value = '';
+
+            if (!filters || filters.length === 0) {
+                aiFilterStatus.textContent = "Filtro AI limpo.";
+                aiFilterStatus.className = 'text-sm font-medium mt-1 text-gray-500';
+                clearAiFilterButton.classList.add('hidden');
+                renderTable(clientData); // Renderiza todos os dados se o filtro for vazio
+                return;
+            }
+
+            const filteredData = clientData.filter(client => {
+                // Todos os filtros devem ser atendidos (AND logic)
+                return filters.every(filter => {
+                    const clientValue = client[filter.field];
+                    const filterValue = String(filter.value);
+
+                    if (clientValue === undefined || clientValue === null) {
+                        return false;
+                    }
+
+                    const normalizedClientValue = String(clientValue).toLowerCase().trim();
+
+                    switch (filter.operator) {
+                        case 'equals':
+                            return normalizedClientValue === filterValue.toLowerCase().trim();
+                        case 'contains':
+                            return normalizedClientValue.includes(filterValue.toLowerCase().trim());
+                        case 'month_year':
+                            // Espera 'MM/YYYY' no filterValue. clientValue é DD/MM/YYYY
+                            const [month, year] = filterValue.split('/');
+                            if (!clientValue.includes('/')) return false;
+                            
+                            const [clientDay, clientMonth, clientYear] = clientValue.split('/');
+                            return clientMonth === month && clientYear === year;
+                        case 'greaterThan':
+                            return parseFloat(clientValue) > parseFloat(filterValue);
+                        case 'lessThan':
+                            return parseFloat(clientValue) < parseFloat(filterValue);
+                        case 'startsWith':
+                            return normalizedClientValue.startsWith(filterValue.toLowerCase().trim());
+                        default:
+                            return true; // Se o operador não for reconhecido, ignora o filtro
+                    }
+                });
+            });
+
+            aiFilterStatus.className = 'text-sm font-medium mt-1 text-purple-700';
+            aiFilterStatus.textContent = `Filtro AI Aplicado: ${filteredData.length} resultados.`;
+            clearAiFilterButton.classList.remove('hidden');
+            renderTable(filteredData);
+        }
+
+        /**
+         * Interage com a AI para obter um objeto de filtro JSON.
+         */
+        async function askAIForFilter() {
+            const query = aiQueryInput.value.trim();
+            if (!query) {
+                aiFilterStatus.className = 'text-sm font-medium mt-1 text-red-600';
+                aiFilterStatus.textContent = "Por favor, digite sua consulta primeiro.";
+                return;
+            }
+
+            // Limpa o input de busca manual quando a AI começa
+            manualSearchInput.value = '';
+
+            // UI Feedback: Loading
+            askAiButton.disabled = true;
+            aiButtonText.classList.add('hidden');
+            aiLoadingSpinner.classList.remove('hidden');
+            aiFilterStatus.textContent = "Consultando AI, aguarde...";
+            aiFilterStatus.className = 'text-sm font-medium mt-1 text-gray-500';
+            errorMessage.classList.add('hidden');
+            
+            // Define o JSON Schema esperado para o filtro
+            const filterSchema = {
+                type: "ARRAY",
+                description: "Array de objetos de filtro. Use um ou mais filtros para atender à solicitação do usuário.",
+                items: {
+                    type: "OBJECT",
+                    properties: {
+                        field: { 
+                            type: "STRING", 
+                            description: `O nome do campo interno para filtrar. Use apenas um destes: ${Object.keys(AI_FIELDS).join(', ')}.` 
+                        },
+                        operator: { 
+                            type: "STRING", 
+                            description: "O operador de comparação. Use 'equals', 'contains' (para texto), 'greaterThan', 'lessThan' (para valores), ou 'month_year' (para datas no formato MM/YYYY)." 
+                        },
+                        value: { 
+                            type: "STRING", 
+                            description: "O valor a ser comparado. Para 'month_year', use o formato MM/YYYY. Para texto, use o valor exato. Para valores, use números." 
+                        }
+                    },
+                    required: ["field", "operator", "value"],
+                    propertyOrdering: ["field", "operator", "value"]
+                }
+            };
+            
+            const systemInstruction = `
+                Você é um analista de dados que traduz consultas em linguagem natural do usuário em um formato de filtro JSON para a tabela de clientes.
+                O usuário fará uma pergunta sobre os dados da tabela. Sua tarefa é retornar APENAS o array JSON estrito, sem quaisquer comentários, explicações ou texto extra.
+
+                Campos disponíveis para filtragem: ${JSON.stringify(AI_FIELDS)}.
+                
+                Exemplos de Tradução:
+                - Pergunta: "Clientes que compraram no mês de Novembro de 2024" -> Filtro: [{"field": "dataVenda", "operator": "month_year", "value": "11/2024"}]
+                - Pergunta: "Vendas acima de 1000" -> Filtro: [{"field": "valor", "operator": "greaterThan", "value": "1000"}]
+                - Pergunta: "Clientes que o nome começa com A" -> Filtro: [{"field": "clienteNome", "operator": "startsWith", "value": "A"}]
+                - Pergunta: "Clientes do vendedor João e que compraram o plano Anual" -> Filtro: [{"field": "vendedor", "operator": "equals", "value": "João"}, {"field": "plano", "operator": "equals", "value": "Anual"}]
+            `;
+            
+            const payload = {
+                contents: [{ parts: [{ text: query }] }],
+                systemInstruction: { parts: [{ text: systemInstruction }] },
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: filterSchema
+                }
+            };
+            
+            let attempts = 0;
+            const maxAttempts = 3;
+            let responseJson = null;
+
+            while (attempts < maxAttempts) {
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`API returned status ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    const textPart = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+                    
+                    if (textPart) {
+                        responseJson = JSON.parse(textPart);
+                        break;
+                    }
+                    throw new Error("Resposta da AI vazia ou malformada.");
+
+                } catch (error) {
+                    attempts++;
+                    console.error(`Tentativa ${attempts} falhou:`, error);
+                    if (attempts < maxAttempts) {
+                        const delay = Math.pow(2, attempts) * 1000;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    } else {
+                        throw new Error(`Falha ao obter resposta da AI após ${maxAttempts} tentativas. Detalhes: ${error.message}`);
+                    }
+                }
+            }
+
+            // UI Feedback: Done
+            askAiButton.disabled = false;
+            aiButtonText.classList.remove('hidden');
+            aiLoadingSpinner.classList.add('hidden');
+
+            if (responseJson) {
+                applyFilter(responseJson);
+            }
+        }
+
+        // --- FUNÇÕES DE DASHBOARD BÁSICAS ---
+
+        /**
+         * Renderiza a tabela de clientes com base nos dados fornecidos.
+         */
+        function renderTable(data) {
+            tableBody.innerHTML = '';
+            if (data.length === 0) {
+                noResultsMessage.classList.remove('hidden');
+                return;
+            }
+            noResultsMessage.classList.add('hidden');
+
+            data.forEach(client => {
+                const row = document.createElement('tr');
+                row.className = 'hover:bg-gray-50 transition duration-150';
+                const status = client.status || "Ativo"; 
+                
+                row.innerHTML = `
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="text-sm font-medium text-gray-900">${client.clienteNome || 'N/A'}</div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="text-sm text-gray-700">${client.usuario || 'N/A'}</div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                        ${formatDate(client.dataVenda || 'N/A')}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                        ${client.vendedor || 'N/A'}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                        ${client.plano || 'N/A'}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="${getStatusBadge(status)}">
+                            ${status}
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                        ${formatCurrency(client.valor || 0)}
+                    </td>
+                `;
+                tableBody.appendChild(row);
+            });
+        }
+
+        /**
+         * Calcula e exibe os KPIs (indicadores) com base em todos os dados.
+         */
+        function calculateKPIs(data) {
+            const totalClientes = data.length;
+            const clientesAtivos = data.filter(c => c.status && c.status.toLowerCase() === 'ativo').length || totalClientes;
+            
+            const valorTotal = data.reduce((acc, c) => {
+                const valor = parseFloat(c.valor) || 0;
+                return acc + valor;
+            }, 0);
+
+            kpiTotalClientes.textContent = totalClientes;
+            kpiClientesAtivos.textContent = clientesAtivos;
+            kpiValorTotal.textContent = formatCurrency(valorTotal);
+        }
+
+        /**
+         * Converte texto CSV para um array de objetos JSON e mapeia para a estrutura interna.
+         */
+        function parseCSV(csvText) {
+            // Lógica de parse CSV (mantida da versão anterior)
+            try {
+                const lines = csvText.trim().split('\n');
+                if (lines.length < 2) {
+                    throw new Error("O CSV precisa de pelo menos um cabeçalho e uma linha de dados.");
+                }
+
+                // Detecta o separador (vírgula, ponto-e-vírgula ou tabulação)
+                let separator = ',';
+                if (lines[0].includes(';')) {
+                    separator = ';';
+                } else if (lines[0].includes('\t')) {
+                    separator = '\t';
+                }
+                
+                // Limpa e normaliza os cabeçalhos: minúsculas e REMOVE TODO TIPO DE WHITESPACE (ESPAÇO, TAB, ETC.)
+                const headers = lines[0].split(separator).map(h => h.trim().toLowerCase().replace(/"/g, '').replace(/\s/g, ''));
+                
+                // Objeto de mapeamento de headers do usuário (normalizados) para chaves internas
+                const headerMappingKeys = {
+                    'clienteNome': ['cliente', 'clientenome', 'nomecliente', 'nome'],
+                    'dataVenda': ['data', 'datadavenda', 'datavenda', 'datadevenda'],
+                    'valor': ['valoratual', 'valor'],
+                    'plano': ['categoria', 'plano', 'tipoplano'],
+                    'vendedor': ['vendedor', 'vend', 'vendedora'],
+                    'status': ['status'], 
+                    'formaPagamento': ['formadepagamento', 'formapagamento', 'forma'],
+                    'anual': ['anual'],
+                    'mensal': ['mensal']
+                };
+
+                // Chaves internas obrigatórias (mínimas para o dashboard funcionar)
+                const internalRequiredKeys = ['clienteNome', 'dataVenda', 'valor', 'plano', 'vendedor'];
+
+                const userHeaderMap = {};
+                const missingHeaders = [];
+                
+                // Mapeamento dos campos do usuário para os índices da planilha
+                for (const internalKey of internalRequiredKeys) {
+                    const potentialUserHeaders = headerMappingKeys[internalKey];
+                    let foundIndex = -1;
+
+                    for (const userHeaderNorm of potentialUserHeaders) {
+                        foundIndex = headers.findIndex(h => h === userHeaderNorm);
+                        if (foundIndex !== -1) {
+                            userHeaderMap[internalKey] = foundIndex;
+                            break; 
+                        }
+                    }
+                    
+                    if (foundIndex === -1) {
+                        missingHeaders.push(`"${internalKey}" (Tentativas normalizadas: ${potentialUserHeaders.join(', ')})`);
+                    }
+                }
+
+                if (missingHeaders.length > 0) {
+                     throw new Error(`As seguintes colunas obrigatórias não foram encontradas: ${missingHeaders.join('; ')}. Certifique-se de incluir a linha de cabeçalho.`);
+                }
+                
+                const jsonData = [];
+                for (let i = 1; i < lines.length; i++) {
+                    const line = lines[i].trim();
+                    if (line === "") continue;
+
+                    const values = line.split(new RegExp(separator)).map(v => v.trim().replace(/"/g, ''));
+                    
+                    if (values.length !== headers.length) {
+                        console.warn(`Linha ${i+1} ignorada: número de colunas incompatível. ${values.length} vs ${headers.length}`);
+                        continue;
+                    }
+
+                    // Mapeamento dos dados do usuário para a estrutura interna do dashboard
+                    let dataVendaValue = values[userHeaderMap['dataVenda']] || '';
+                    if (dataVendaValue && !dataVendaValue.includes('/')) {
+                        // Tenta converter ISO para DD/MM/AAAA se for o caso
+                        const parts = dataVendaValue.split('-');
+                        if (parts.length === 3) {
+                             dataVendaValue = `${parts[2]}/${parts[1]}/${parts[0]}`;
+                        }
+                    }
+
+                    jsonData.push({
+                        clienteNome: values[userHeaderMap['clienteNome']] || '',
+                        usuario: "N/A", 
+                        dataVenda: dataVendaValue,
+                        vendedor: values[userHeaderMap['vendedor']] || '',
+                        plano: values[userHeaderMap['plano']] || '', 
+                        status: (userHeaderMap['status'] !== undefined) ? values[userHeaderMap['status']] : "Ativo", // Prioriza o status se existir, senão usa Ativo
+                        valor: parseFloat(String(values[userHeaderMap['valor']]).replace("R$", "").replace(/\./g, "").replace(",", ".")) || 0
+                    });
+                }
+                return jsonData;
+            } catch (error) {
+                errorMessage.textContent = `Erro ao processar: ${error.message}`;
+                console.error("Erro no parsing do CSV:", error);
+                errorMessage.classList.remove('hidden');
+                return null;
+            }
+        }
+
+        /**
+         * Função chamada pelo botão "Processar".
+         */
+        function processData() {
+            const csvText = csvInput.value;
+            if (csvText.trim() === "") {
+                errorMessage.textContent = "Por favor, cole os dados da sua planilha.";
+                errorMessage.classList.remove('hidden');
+                return;
+            }
+
+            errorMessage.classList.add('hidden'); // Oculta erros anteriores
+            const data = parseCSV(csvText);
+
+            if (data && data.length > 0) {
+                // Em vez de apenas carregar localmente, agora salvamos no Firestore
+                window.saveSharedData(data);
+            } else if (data && data.length === 0) {
+                 errorMessage.textContent = "Nenhuma linha de dado válida foi encontrada no texto colado.";
+                errorMessage.classList.remove('hidden');
+            }
+        }
+
+
+        // --- INICIALIZAÇÃO ---
+        document.addEventListener('DOMContentLoaded', () => {
+            // Adiciona o listener de evento para o botão de processar (entrada de dados)
+            processButton.addEventListener('click', processData);
+            
+            // Note: O listener de input para busca manual é adicionado em window.loadClientData,
+            // garantindo que ele só funcione após o carregamento dos dados.
+        });
+
+    </script>
+</body>
+</html>
